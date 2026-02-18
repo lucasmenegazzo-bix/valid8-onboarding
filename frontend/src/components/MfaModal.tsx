@@ -1,4 +1,4 @@
-import { useState, useRef, KeyboardEvent } from 'react';
+import { useState, useRef, useEffect, KeyboardEvent } from 'react';
 import { X, KeyRound } from 'lucide-react';
 
 interface Props {
@@ -6,9 +6,33 @@ interface Props {
   onClose: () => void;
 }
 
+const AUTO_FILL_CODE = '482913';
+
 export function MfaModal({ onSubmit, onClose }: Props) {
   const [digits, setDigits] = useState(['', '', '', '', '', '']);
   const inputsRef = useRef<(HTMLInputElement | null)[]>([]);
+
+  // Auto-fill the MFA code one digit at a time for demo purposes
+  useEffect(() => {
+    const chars = AUTO_FILL_CODE.split('');
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    chars.forEach((char, i) => {
+      timers.push(
+        setTimeout(() => {
+          setDigits((prev) => {
+            const next = [...prev];
+            next[i] = char;
+            return next;
+          });
+          // Auto-submit after last digit
+          if (i === chars.length - 1) {
+            timers.push(setTimeout(() => onSubmit(AUTO_FILL_CODE), 400));
+          }
+        }, 200 + i * 150)
+      );
+    });
+    return () => timers.forEach(clearTimeout);
+  }, [onSubmit]);
 
   const handleChange = (index: number, value: string) => {
     if (!/^\d*$/.test(value)) return;
