@@ -71,7 +71,12 @@ export function IdentityPage() {
 
   const handleProviderContinue = () => {
     if (!provider) return;
-    setSubStep('select-id');
+    // Persona handles ID type internally — skip select-id
+    if (provider === 'persona') {
+      setSubStep('verify-intro');
+    } else {
+      setSubStep('select-id');
+    }
   };
 
   /* ── ID type selection ── */
@@ -494,11 +499,11 @@ export function IdentityPage() {
 
               <div className="flex items-center justify-between mt-6">
                 <button
-                  onClick={() => setSubStep('select-id')}
+                  onClick={() => setSubStep(provider === 'persona' ? 'provider-select' : 'select-id')}
                   className="flex items-center gap-1.5 px-5 py-2 border border-gray-300 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
                 >
                   <ChevronLeft size={16} />
-                  Change ID Type
+                  {provider === 'persona' ? 'Previous' : 'Change ID Type'}
                 </button>
               </div>
             </>
