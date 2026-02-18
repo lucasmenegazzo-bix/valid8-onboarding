@@ -1,9 +1,11 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from models import LoginRequest, MfaRequest, PersonalInfoRequest, EducationRequest, EmploymentRequest
 from mock_data import MOCK_USER, MOCK_ID_SCAN, MOCK_PROGRESS
 import os
 import httpx
+import asyncio
+import base64
 
 app = FastAPI(title="Valid8 Onboarding API")
 
@@ -139,6 +141,171 @@ async def persona_webhook(request: Request):
     print(f"[Persona webhook] event={event_type} inquiry={inquiry_id}")
     # TODO: persist verification result
     return {"received": True}
+
+
+@app.post("/api/kyc/persona/verify-direct")
+async def persona_verify_direct(
+    front_image: UploadFile = File(...),
+    back_image: UploadFile = File(None),
+    selfie_image: UploadFile = File(...),
+    reference_id: str = Form(""),
+    id_class: str = Form("pp"),
+):
+    """
+    Full Persona verification via API only — no SDK involved.
+    1. Create an inquiry
+    2. Upload government-id verification (front + optional back)
+    3. Upload selfie verification
+    4. Submit the inquiry for review
+    5. Poll until completed or timeout
+
+    id_class values: 'pp' (passport), 'dl' (driver license), 'id' (national id)
+    """
+    if not PERSONA_API_KEY:
+        # Mock response when no API key configured
+        return {
+            "status": "completed",
+            "fields": MOCK_ID_SCAN,
+            "inquiry_id": "inq_mock_direct",
+            "note": "No API key configured; returning mock data",
+        }
+
+    headers = {
+        "Authorization": f"Bearer {PERSONA_API_KEY}",
+        "Persona-Version": "2023-01-05",
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # ── 1. Create inquiry ──
+        create_resp = await client.post(
+            f"{PERSONA_API_BASE}/inquiries",
+            headers={**headers, "Content-Type": "application/json"},
+            json={
+                "data": {
+                    "attributes": {
+                        "inquiry-template-id": PERSONA_TEMPLATE_ID,
+                        "reference-id": reference_id,
+                    }
+                }
+            },
+        )
+        create_data = create_resp.json()
+        inquiry = create_data.get("data", {})
+        inquiry_id = inquiry.get("id")
+        if not inquiry_id:
+            return {"status": "error", "message": "Failed to create inquiry", "details": create_data}
+
+        # Find the government_id and selfie verification IDs
+        verifications = inquiry.get("relationships", {}).get("verifications", {}).get("data", [])
+        gov_id_verif = None
+        selfie_verif = None
+        for v in verifications:
+            if v.get("type") == "verification/government-id":
+                gov_id_verif = v.get("id")
+            elif v.get("type") == "verification/selfie":
+                selfie_verif = v.get("id")
+
+        # If verification IDs aren't in relationships, list them
+        if not gov_id_verif or not selfie_verif:
+            verif_resp = await client.get(
+                f"{PERSONA_API_BASE}/inquiries/{inquiry_id}/verifications",
+                headers=headers,
+            )
+            verif_list = verif_resp.json().get("data", [])
+            for v in verif_list:
+                v_type = v.get("type", "")
+                if "government-id" in v_type and not gov_id_verif:
+                    gov_id_verif = v.get("id")
+                elif "selfie" in v_type and not selfie_verif:
+                    selfie_verif = v.get("id")
+
+        # ── 2. Upload front of ID ──
+        front_bytes = await front_image.read()
+        front_b64 = base64.b64encode(front_bytes).decode()
+
+        upload_payload = {
+            "data": {
+                "attributes": {
+                    "front-photo": f"data:{front_image.content_type or 'image/jpeg'};base64,{front_b64}",
+                    "id-class": id_class,
+                }
+            }
+        }
+
+        # Add back photo if provided
+        if back_image:
+            back_bytes = await back_image.read()
+            back_b64 = base64.b64encode(back_bytes).decode()
+            upload_payload["data"]["attributes"]["back-photo"] = (
+                f"data:{back_image.content_type or 'image/jpeg'};base64,{back_b64}"
+            )
+
+        if gov_id_verif:
+            await client.patch(
+                f"{PERSONA_API_BASE}/verifications/government-ids/{gov_id_verif}/submit",
+                headers={**headers, "Content-Type": "application/json"},
+                json=upload_payload,
+            )
+
+        # ── 3. Upload selfie ──
+        selfie_bytes = await selfie_image.read()
+        selfie_b64 = base64.b64encode(selfie_bytes).decode()
+
+        if selfie_verif:
+            await client.patch(
+                f"{PERSONA_API_BASE}/verifications/selfies/{selfie_verif}/submit",
+                headers={**headers, "Content-Type": "application/json"},
+                json={
+                    "data": {
+                        "attributes": {
+                            "center-photo": f"data:{selfie_image.content_type or 'image/jpeg'};base64,{selfie_b64}",
+                        }
+                    }
+                },
+            )
+
+        # ── 4. Submit inquiry for review ──
+        await client.post(
+            f"{PERSONA_API_BASE}/inquiries/{inquiry_id}/submit",
+            headers=headers,
+        )
+
+        # ── 5. Poll for completion (up to 30 seconds) ──
+        final_status = "pending"
+        fields = {}
+        for _ in range(15):
+            await asyncio.sleep(2)
+            poll_resp = await client.get(
+                f"{PERSONA_API_BASE}/inquiries/{inquiry_id}",
+                headers=headers,
+            )
+            poll_data = poll_resp.json().get("data", {})
+            final_status = poll_data.get("attributes", {}).get("status", "pending")
+            if final_status in ("completed", "approved", "declined", "failed", "needs_review"):
+                attrs = poll_data.get("attributes", {})
+                fields = attrs.get("fields", {})
+                break
+
+        # Extract readable fields
+        def field_val(f):
+            if isinstance(f, dict):
+                return f.get("value", "")
+            return str(f) if f else ""
+
+        extracted = {
+            "fullName": f"{field_val(fields.get('name-first', ''))} {field_val(fields.get('name-last', ''))}".strip(),
+            "birthdate": field_val(fields.get("birthdate", "")),
+            "gender": field_val(fields.get("sex", "")),
+            "idType": field_val(fields.get("identification-class", "")) or "Government ID",
+            "idNumber": field_val(fields.get("identification-number", "")),
+            "expirationDate": field_val(fields.get("expiration-date", "")),
+        }
+
+        return {
+            "status": final_status,
+            "inquiry_id": inquiry_id,
+            "fields": extracted,
+        }
 
 
 # ── Onfido KYC endpoints ─────────────────────────────────────────

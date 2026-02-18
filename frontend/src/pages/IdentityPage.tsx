@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Globe, CreditCard, IdCard, Info, ShieldCheck, ChevronLeft, Lock, Eye, ScanFace, FileCheck2, Camera, Loader2, Fingerprint } from 'lucide-react';
+import { Globe, CreditCard, IdCard, Info, ShieldCheck, ChevronLeft, Lock, Eye, ScanFace, FileCheck2, Camera, Loader2, Fingerprint, Upload, Server, MonitorSmartphone, Check, X } from 'lucide-react';
 import { OnboardingLayout } from '../layouts/OnboardingLayout';
 import { ChatBubble } from '../components/ChatBubble';
 import { PersonaVerification, PersonaFields } from '../components/PersonaVerification';
@@ -50,6 +50,16 @@ export function IdentityPage() {
   const [personaInquiryId, setPersonaInquiryId] = useState<string | null>(null);
   const [personaSessionToken, setPersonaSessionToken] = useState<string | null>(null);
   const [creatingInquiry, setCreatingInquiry] = useState(false);
+
+  /* API-direct flow state (no SDK) */
+  const [frontImage, setFrontImage] = useState<File | null>(null);
+  const [backImage, setBackImage] = useState<File | null>(null);
+  const [selfieImage, setSelfieImage] = useState<File | null>(null);
+  const [apiDirectStatus, setApiDirectStatus] = useState<'idle' | 'uploading' | 'processing' | 'done' | 'error'>('idle');
+  const [apiDirectError, setApiDirectError] = useState<string | null>(null);
+  const frontInputRef = useRef<HTMLInputElement>(null);
+  const backInputRef = useRef<HTMLInputElement>(null);
+  const selfieInputRef = useRef<HTMLInputElement>(null);
 
   const navigate = useNavigate();
   const { setIdType, setIdScan, setProgress, setCurrentStep } = useOnboarding();
@@ -145,9 +155,6 @@ export function IdentityPage() {
 
   /* ── Onfido callbacks ── */
   const handleOnfidoComplete = (_result: OnfidoResult) => {
-    // Onfido doesn't return OCR fields client-side — extraction happens
-    // server-side via check creation.  Use mock data for now; in production
-    // you'd poll /api/kyc/onfido/check/:id for extracted fields.
     setScanResult(MOCK_SCAN);
     setSubStep('review');
   };
@@ -155,6 +162,68 @@ export function IdentityPage() {
   const handleOnfidoCancel = () => {
     setOnfidoSdkToken(null);
     setSubStep('verify-intro');
+  };
+
+  /* ── Persona API-direct flow (no SDK) ── */
+  const handleApiDirectSubmit = async () => {
+    if (!frontImage || !selfieImage) return;
+    setApiDirectStatus('uploading');
+    setApiDirectError(null);
+
+    const idClassMap: Record<string, string> = {
+      us_passport: 'pp',
+      foreign_passport: 'pp',
+      drivers_license: 'dl',
+      real_id: 'id',
+      permanent_resident: 'id',
+    };
+
+    try {
+      const formData = new FormData();
+      formData.append('front_image', frontImage);
+      if (backImage) formData.append('back_image', backImage);
+      formData.append('selfie_image', selfieImage);
+      formData.append('reference_id', 'lucas.menegazzo@bix-tech.com');
+      formData.append('id_class', idClassMap[selectedId ?? ''] || 'pp');
+
+      setApiDirectStatus('processing');
+      const res = await fetch('/api/kyc/persona/verify-direct', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json();
+
+      if (data.status === 'error') {
+        setApiDirectError(data.message || 'Verification failed');
+        setApiDirectStatus('error');
+        return;
+      }
+
+      // Merge extracted fields
+      const f = data.fields || {};
+      setScanResult({
+        fullName: f.fullName || MOCK_SCAN.fullName,
+        birthdate: f.birthdate || MOCK_SCAN.birthdate,
+        gender: f.gender || MOCK_SCAN.gender,
+        idType: f.idType || MOCK_SCAN.idType,
+        idNumber: f.idNumber || MOCK_SCAN.idNumber,
+        expirationDate: f.expirationDate || MOCK_SCAN.expirationDate,
+      });
+      setApiDirectStatus('done');
+      setSubStep('review');
+    } catch (err) {
+      console.error('API-direct verification error:', err);
+      setApiDirectError('Network error — please try again');
+      setApiDirectStatus('error');
+    }
+  };
+
+  const handleApiDirectReset = () => {
+    setFrontImage(null);
+    setBackImage(null);
+    setSelfieImage(null);
+    setApiDirectStatus('idle');
+    setApiDirectError(null);
   };
 
   /* ── Review actions ── */
@@ -352,24 +421,62 @@ export function IdentityPage() {
                   </div>
                 </div>
 
-                {/* Begin verification button */}
-                <button
-                  onClick={provider === 'persona' ? handleBeginPersonaVerification : handleBeginOnfidoVerification}
-                  disabled={creatingInquiry}
-                  className="inline-flex items-center gap-2 px-8 py-3 bg-teal-500 hover:bg-teal-600 disabled:bg-teal-300 text-white font-semibold rounded-xl text-sm transition-all shadow-lg shadow-teal-500/25 hover:shadow-xl hover:shadow-teal-500/30"
-                >
-                  {creatingInquiry ? (
-                    <>
-                      <Loader2 size={18} className="animate-spin" />
-                      Preparing verification…
-                    </>
-                  ) : (
-                    <>
-                      <Camera size={18} />
-                      Begin Secure Verification
-                    </>
-                  )}
-                </button>
+                {/* Begin verification buttons */}
+                {provider === 'persona' ? (
+                  <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+                    {/* SDK button */}
+                    <button
+                      onClick={handleBeginPersonaVerification}
+                      disabled={creatingInquiry}
+                      className="inline-flex items-center gap-2 px-7 py-3 bg-teal-500 hover:bg-teal-600 disabled:bg-teal-300 text-white font-semibold rounded-xl text-sm transition-all shadow-lg shadow-teal-500/25 hover:shadow-xl hover:shadow-teal-500/30"
+                    >
+                      {creatingInquiry ? (
+                        <>
+                          <Loader2 size={18} className="animate-spin" />
+                          Preparing…
+                        </>
+                      ) : (
+                        <>
+                          <MonitorSmartphone size={18} />
+                          Persona SDK
+                        </>
+                      )}
+                    </button>
+                    {/* API-direct button */}
+                    <button
+                      onClick={() => setSubStep('persona-api')}
+                      className="inline-flex items-center gap-2 px-7 py-3 bg-purple-500 hover:bg-purple-600 text-white font-semibold rounded-xl text-sm transition-all shadow-lg shadow-purple-500/25 hover:shadow-xl hover:shadow-purple-500/30"
+                    >
+                      <Server size={18} />
+                      Persona API
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleBeginOnfidoVerification}
+                    disabled={creatingInquiry}
+                    className="inline-flex items-center gap-2 px-8 py-3 bg-teal-500 hover:bg-teal-600 disabled:bg-teal-300 text-white font-semibold rounded-xl text-sm transition-all shadow-lg shadow-teal-500/25 hover:shadow-xl hover:shadow-teal-500/30"
+                  >
+                    {creatingInquiry ? (
+                      <>
+                        <Loader2 size={18} className="animate-spin" />
+                        Preparing verification…
+                      </>
+                    ) : (
+                      <>
+                        <Camera size={18} />
+                        Begin Secure Verification
+                      </>
+                    )}
+                  </button>
+                )}
+
+                {provider === 'persona' && (
+                  <div className="mt-4 flex items-start gap-2 text-xs text-gray-400 max-w-md mx-auto">
+                    <Info size={14} className="flex-shrink-0 mt-0.5" />
+                    <p><strong>SDK</strong> opens the Persona widget in-browser. <strong>API</strong> uploads your documents directly to Persona's servers — no widget needed.</p>
+                  </div>
+                )}
               </div>
 
               {/* Security badges */}
@@ -392,6 +499,166 @@ export function IdentityPage() {
                 >
                   <ChevronLeft size={16} />
                   Change ID Type
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* ──────────────────────────────────────────────────────
+               Step 1c — Persona API Direct (upload form, no SDK)
+             ────────────────────────────────────────────────────── */}
+          {subStep === 'persona-api' && (
+            <>
+              <ChatBubble>
+                Upload your government-issued ID and a selfie photo. We'll send them directly to Persona's servers for
+                verification — no pop-up widget required.
+              </ChatBubble>
+
+              <div className="mt-6 space-y-4">
+                {/* Front of ID */}
+                <div
+                  onClick={() => frontInputRef.current?.click()}
+                  className={`relative flex items-center gap-4 p-4 rounded-xl border-2 border-dashed cursor-pointer transition-all ${
+                    frontImage
+                      ? 'border-teal-400 bg-teal-50'
+                      : 'border-gray-200 hover:border-teal-300 hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="w-12 h-12 bg-teal-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                    {frontImage ? <Check size={24} className="text-teal-600" /> : <FileCheck2 size={24} className="text-teal-500" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-gray-800">Front of ID <span className="text-red-400">*</span></p>
+                    <p className="text-xs text-gray-400 truncate">
+                      {frontImage ? frontImage.name : 'Click to upload — JPG, PNG, or PDF'}
+                    </p>
+                  </div>
+                  {frontImage && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setFrontImage(null); }}
+                      className="p-1 rounded-full hover:bg-gray-200 transition-colors"
+                    >
+                      <X size={16} className="text-gray-400" />
+                    </button>
+                  )}
+                  <input
+                    ref={frontInputRef}
+                    type="file"
+                    accept="image/*,.pdf"
+                    className="hidden"
+                    onChange={(e) => setFrontImage(e.target.files?.[0] ?? null)}
+                  />
+                </div>
+
+                {/* Back of ID (optional) */}
+                <div
+                  onClick={() => backInputRef.current?.click()}
+                  className={`relative flex items-center gap-4 p-4 rounded-xl border-2 border-dashed cursor-pointer transition-all ${
+                    backImage
+                      ? 'border-teal-400 bg-teal-50'
+                      : 'border-gray-200 hover:border-teal-300 hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="w-12 h-12 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                    {backImage ? <Check size={24} className="text-teal-600" /> : <FileCheck2 size={24} className="text-gray-400" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-gray-800">Back of ID <span className="text-gray-300 text-xs font-normal">(optional)</span></p>
+                    <p className="text-xs text-gray-400 truncate">
+                      {backImage ? backImage.name : 'Required for driver\'s license & Real ID'}
+                    </p>
+                  </div>
+                  {backImage && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setBackImage(null); }}
+                      className="p-1 rounded-full hover:bg-gray-200 transition-colors"
+                    >
+                      <X size={16} className="text-gray-400" />
+                    </button>
+                  )}
+                  <input
+                    ref={backInputRef}
+                    type="file"
+                    accept="image/*,.pdf"
+                    className="hidden"
+                    onChange={(e) => setBackImage(e.target.files?.[0] ?? null)}
+                  />
+                </div>
+
+                {/* Selfie */}
+                <div
+                  onClick={() => selfieInputRef.current?.click()}
+                  className={`relative flex items-center gap-4 p-4 rounded-xl border-2 border-dashed cursor-pointer transition-all ${
+                    selfieImage
+                      ? 'border-teal-400 bg-teal-50'
+                      : 'border-gray-200 hover:border-teal-300 hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                    {selfieImage ? <Check size={24} className="text-teal-600" /> : <ScanFace size={24} className="text-purple-500" />}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-gray-800">Selfie Photo <span className="text-red-400">*</span></p>
+                    <p className="text-xs text-gray-400 truncate">
+                      {selfieImage ? selfieImage.name : 'Clear, well-lit photo of your face'}
+                    </p>
+                  </div>
+                  {selfieImage && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setSelfieImage(null); }}
+                      className="p-1 rounded-full hover:bg-gray-200 transition-colors"
+                    >
+                      <X size={16} className="text-gray-400" />
+                    </button>
+                  )}
+                  <input
+                    ref={selfieInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => setSelfieImage(e.target.files?.[0] ?? null)}
+                  />
+                </div>
+              </div>
+
+              {/* Status / error */}
+              {apiDirectStatus === 'processing' && (
+                <div className="mt-4 flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                  <Loader2 size={16} className="text-blue-500 animate-spin" />
+                  <p className="text-xs text-blue-700">Uploading documents & running verification… This may take up to 30 seconds.</p>
+                </div>
+              )}
+              {apiDirectStatus === 'error' && (
+                <div className="mt-4 flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-lg">
+                  <X size={16} className="text-red-500" />
+                  <p className="text-xs text-red-700">{apiDirectError}</p>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between mt-6">
+                <button
+                  onClick={() => { handleApiDirectReset(); setSubStep('verify-intro'); }}
+                  className="flex items-center gap-1.5 px-5 py-2 border border-gray-300 text-gray-600 rounded-lg text-sm font-medium hover:bg-gray-50 transition-colors"
+                >
+                  <ChevronLeft size={16} />
+                  Back
+                </button>
+                <button
+                  onClick={handleApiDirectSubmit}
+                  disabled={!frontImage || !selfieImage || apiDirectStatus === 'processing' || apiDirectStatus === 'uploading'}
+                  className="inline-flex items-center gap-2 px-7 py-2.5 bg-purple-500 hover:bg-purple-600 disabled:bg-gray-300 text-white font-semibold rounded-lg text-sm transition-colors"
+                >
+                  {apiDirectStatus === 'processing' || apiDirectStatus === 'uploading' ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      Verifying…
+                    </>
+                  ) : (
+                    <>
+                      <Upload size={16} />
+                      Submit for Verification
+                    </>
+                  )}
                 </button>
               </div>
             </>

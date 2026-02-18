@@ -57,7 +57,7 @@ export type IdType = 'us_passport' | 'drivers_license' | 'real_id' | 'foreign_pa
 
 export type KycProvider = 'persona' | 'au10tix' | 'onfido' | 'idme';
 
-export type IdentitySubStep = 'provider-select' | 'select-id' | 'verify-intro' | 'verification' | 'review';
+export type IdentitySubStep = 'provider-select' | 'select-id' | 'verify-intro' | 'verification' | 'persona-api' | 'review';
 
 export type EducationLevel =
   | 'high_school'
