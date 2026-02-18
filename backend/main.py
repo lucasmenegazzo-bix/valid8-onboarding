@@ -11,6 +11,9 @@ PERSONA_API_KEY = os.getenv("PERSONA_API_KEY", "")
 PERSONA_TEMPLATE_ID = os.getenv("PERSONA_TEMPLATE_ID", "")
 PERSONA_API_BASE = "https://withpersona.com/api/v1"
 
+ONFIDO_API_TOKEN = os.getenv("ONFIDO_API_TOKEN", "")
+ONFIDO_API_BASE = "https://api.onfido.com/v3.6"  # US region; use api.eu.onfido.com for EU
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:3000"],
@@ -134,6 +137,99 @@ async def persona_webhook(request: Request):
         payload.get("data", {}).get("relationships", {}).get("inquiry", {}).get("data", {}).get("id")
     )
     print(f"[Persona webhook] event={event_type} inquiry={inquiry_id}")
+    # TODO: persist verification result
+    return {"received": True}
+
+
+# ── Onfido KYC endpoints ─────────────────────────────────────────
+
+@app.post("/api/kyc/onfido/sdk-token")
+async def onfido_sdk_token(request: Request):
+    """Create an Onfido applicant and generate an SDK token for the web SDK."""
+    body = await request.json() if await request.body() else {}
+    first_name = body.get("first_name", "Jane")
+    last_name = body.get("last_name", "Doe")
+
+    if not ONFIDO_API_TOKEN:
+        # No API token configured – return a mock token so the frontend still renders
+        return {
+            "sdk_token": "mock_onfido_sdk_token_sandbox",
+            "applicant_id": "mock_applicant_id",
+            "note": "No ONFIDO_API_TOKEN configured; using mock token",
+        }
+
+    headers = {
+        "Authorization": f"Token token={ONFIDO_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient() as client:
+        # 1. Create applicant
+        applicant_resp = await client.post(
+            f"{ONFIDO_API_BASE}/applicants",
+            headers=headers,
+            json={"first_name": first_name, "last_name": last_name},
+        )
+        applicant_data = applicant_resp.json()
+        applicant_id = applicant_data.get("id")
+
+        if not applicant_id:
+            return {"error": "Failed to create applicant", "details": applicant_data}
+
+        # 2. Generate SDK token
+        sdk_resp = await client.post(
+            f"{ONFIDO_API_BASE}/sdk_token",
+            headers=headers,
+            json={
+                "applicant_id": applicant_id,
+                "referrer": "*://*/*",  # allow any referrer in sandbox
+            },
+        )
+        sdk_data = sdk_resp.json()
+        sdk_token = sdk_data.get("token")
+
+        return {"sdk_token": sdk_token, "applicant_id": applicant_id}
+
+
+@app.post("/api/kyc/onfido/create-check")
+async def onfido_create_check(request: Request):
+    """Create an Onfido check (document + facial_similarity_photo) after SDK capture."""
+    body = await request.json()
+    applicant_id = body.get("applicant_id", "")
+
+    if not ONFIDO_API_TOKEN or not applicant_id:
+        return {"check_id": "mock_check_id", "status": "in_progress"}
+
+    headers = {
+        "Authorization": f"Token token={ONFIDO_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{ONFIDO_API_BASE}/checks",
+            headers=headers,
+            json={
+                "applicant_id": applicant_id,
+                "report_names": ["document", "facial_similarity_photo"],
+            },
+        )
+        data = resp.json()
+        return {
+            "check_id": data.get("id"),
+            "status": data.get("status"),
+            "result": data.get("result"),
+        }
+
+
+@app.post("/api/kyc/onfido/webhook")
+async def onfido_webhook(request: Request):
+    """Receive Onfido webhook events."""
+    payload = await request.json()
+    action = payload.get("payload", {}).get("action", "")
+    resource_type = payload.get("payload", {}).get("resource_type", "")
+    object_id = payload.get("payload", {}).get("object", {}).get("id", "")
+    print(f"[Onfido webhook] action={action} resource={resource_type} id={object_id}")
     # TODO: persist verification result
     return {"received": True}
 

@@ -5,10 +5,14 @@ import type { Field } from 'persona/dist/lib/interfaces';
 import { Loader2, CheckCircle2, AlertTriangle } from 'lucide-react';
 
 interface Props {
-  /** Persona template ID for Document + Selfie */
-  templateId: string;
+  /** Persona template ID for Document + Selfie (used for client-side flow) */
+  templateId?: string;
   /** Use 'sandbox' or 'production' */
   environment?: 'sandbox' | 'production';
+  /** Server-side inquiry ID (API flow — takes precedence over templateId) */
+  inquiryId?: string;
+  /** Session token for resuming a server-created inquiry */
+  sessionToken?: string;
   /** Called with extracted fields when inquiry completes */
   onComplete: (fields: PersonaFields) => void;
   /** Called when the user cancels the flow */
@@ -40,6 +44,8 @@ type Status = 'loading' | 'ready' | 'verifying' | 'completed' | 'failed' | 'canc
 export function PersonaVerification({
   templateId,
   environment = 'sandbox',
+  inquiryId,
+  sessionToken,
   onComplete,
   onCancel,
   referenceId,
@@ -53,15 +59,15 @@ export function PersonaVerification({
     if (!containerRef.current) return;
 
     try {
-      const client = new Client({
-        templateId,
+      // Build config: prefer API flow (inquiryId+sessionToken) over template flow
+      const baseConfig = {
         environment,
         referenceId,
         onReady: () => {
           setStatus('ready');
           client.open();
         },
-        onComplete: ({ inquiryId, status: _inquiryStatus, fields }) => {
+        onComplete: ({ inquiryId: completedId, status: _inquiryStatus, fields }: { inquiryId?: string; status: string; fields?: Record<string, Field | string> }) => {
           setStatus('completed');
           const nameFirst = fieldValue(fields?.['name-first']);
           const nameLast = fieldValue(fields?.['name-last']);
@@ -74,7 +80,7 @@ export function PersonaVerification({
             idType: fieldValue(fields?.['identification-class']) || 'Government ID',
             idNumber: fieldValue(fields?.['identification-number']),
             expirationDate: fieldValue(fields?.['expiration-date']),
-            inquiryId: inquiryId || '',
+            inquiryId: completedId || inquiryId || '',
           };
 
           onComplete(extracted);
@@ -88,7 +94,14 @@ export function PersonaVerification({
           setError(err.message || 'Verification failed');
           setStatus('failed');
         },
-      });
+      };
+
+      // API flow: resume server-created inquiry
+      const clientConfig = inquiryId && sessionToken
+        ? { ...baseConfig, inquiryId, sessionToken }
+        : { ...baseConfig, templateId: templateId || '' };
+
+      const client = new Client(clientConfig);
 
       clientRef.current = client;
     } catch (err) {
@@ -100,7 +113,7 @@ export function PersonaVerification({
     return () => {
       clientRef.current?.destroy();
     };
-  }, [templateId, environment, referenceId]);
+  }, [templateId, environment, referenceId, inquiryId, sessionToken]);
 
   return (
     <div className="flex flex-col items-center py-6">
