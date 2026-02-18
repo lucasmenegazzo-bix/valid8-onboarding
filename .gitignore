@@ -1,0 +1,22 @@
+# Dependencies
+frontend/node_modules/
+backend/__pycache__/
+backend/*.pyc
+
+# Build outputs
+frontend/dist/
+
+# Environment variables (contain API keys)
+frontend/.env
+backend/.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
